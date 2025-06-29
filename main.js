@@ -22,7 +22,7 @@ async function main() {
     next: z.string().optional(),
   });
 
-  // ✅ Configuramos la herramienta Tavily para búsqueda web
+  // Configuramos la herramienta Tavily para búsqueda web
   const tavilyTool = new TavilySearch({
     apiKey: process.env.TAVILY_API_KEY,
   });
