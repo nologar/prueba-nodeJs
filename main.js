@@ -8,6 +8,9 @@ import { StateGraph, START, END } from "@langchain/langgraph";
 import { z } from "zod";
 import { TavilySearch } from "@langchain/tavily";
 
+// Flag de debug
+const debug = false; // Con esto se controla si queremos mostrar los logs o solo el resultado final
+
 async function main() {
   // Definimos el esquema de entrada y salida del grafo
   const schema = z.object({
@@ -27,58 +30,88 @@ async function main() {
     apiKey: process.env.TAVILY_API_KEY,
   });
 
-  // Prompt que guaida al LLM
+  // Prompt que guía al LLM 
   const systemMessage = `
-Eres un asistente inteligente.
+Eres un asistente inteligente y ordenado. Tu objetivo es ayudar al usuario de forma precisa y segura.
 
-- Si puedes contestar directamente, responde en JSON así:
+- Siempre debes responder en formato JSON válido.
+- No escribas texto fuera del bloque JSON (ni explicaciones, ni comentarios, ni etiquetas como <think>).
+- Si conoces la respuesta con seguridad, devuélvela directamente así:
+
 {"action":"finish","answer":"...respuesta..."}
 
-- Si necesitas buscar en internet, responde en JSON así:
+- Si no estás completamente seguro de la respuesta o crees que necesitas información actualizada, debes usar la herramienta Tavily. Para ello, responde así:
+
 {
   "action":"use_tool",
   "tool":"tavily_search",
   "tool_input":{"query":"...texto a buscar..."}
 }
 
-No escribas ningún texto fuera del bloque JSON.
+- Si usas Tavily, incluye en tu respuesta final el enlace de la fuente principal que hayas usado (URL) para respaldar tu información.
 
-Incluye en tu respuesta la URL de la fuente si usas Tavily.
+Ejemplo de respuesta directa:
+
+{"action":"finish","answer":"El presidente de España es Pedro Sánchez desde 2018."}
+
+Ejemplo de petición para usar Tavily:
+
+{
+  "action":"use_tool",
+  "tool":"tavily_search",
+  "tool_input":{"query":"Último resultado del Real Madrid"}
+}
 `;
 
   // Definimos el nodo del LLM
   const chatbotNode = async (state) => {
-    console.log("\n🤖 Ejecutando LLM...");
+    // Si estamos en modo debug, mostramos el estado actual
+    if (debug) console.log("\n🤖 Ejecutando LLM...");
 
     let prompt = `${systemMessage}\n\nPregunta del usuario: ${state.input}`;
 
     if (state.intermediateSteps?.length) {
       prompt += `\n\nInformación obtenida de herramientas:\n${JSON.stringify(state.intermediateSteps, null, 2)}`;
     }
-    //Instanciamos un modelo de groq LLM
+
+    // Instanciamos un modelo de Groq LLM
     const llm = new ChatGroq({
       apiKey: process.env.GROQ_API_KEY,
-      model: "qwen-qwq-32b", // Modelo de groq qwen.
+      model: "qwen-qwq-32b", // Modelo de Groq qwen.
       temperature: 0.3, // Controla la aleatoriedad de las respuestas
       maxTokens: 1024, // Máximo de tokens en la respuesta del LLM
     });
-    
-    // Llamamos al modelo para hacer una pregunta
-    const response = await llm.invoke(prompt);
 
-    console.log("➡️ Respuesta RAW del LLM:\n", response.content);
+    let response;
+    try {
+      // Invocamos el LLM con el prompt generado
+      response = await llm.invoke(prompt);
+    } catch (error) {
+      console.error("❌ Error al invocar el LLM:", error);
+      return {
+        ...state,
+        result: "Error: No se pudo invocar el LLM.",
+        next: "END",
+      };
+    }
+    // Si estamos en modo debug, mostramos la respuesta cruda del LLM
+    if (debug) console.log("➡️ Respuesta RAW del LLM:\n", response.content);
 
     let parsed;
     try {
-      // Buscamos el JSON en la respuesta del LLM
-      const regex = /{[\s\S]*}/;
+      // Busca bloque JSON multi-línea en toda la respuesta
+      const regex = /{[\s\S]*}/m;
       const match = response.content.match(regex);
-      if (match) {
-        parsed = JSON.parse(match[0]);
-      } else {
+
+      if (!match) {
         throw new Error("No se encontró JSON en la respuesta del LLM.");
       }
-      // Validamos que la respuesta tenga la estructura esperada
+
+      parsed = JSON.parse(match[0]);
+
+      if (!parsed.action) {
+        throw new Error("El JSON devuelto no contiene el campo 'action'.");
+      }
     } catch (e) {
       console.error("❌ Error parseando JSON:", e);
       return {
@@ -87,10 +120,12 @@ Incluye en tu respuesta la URL de la fuente si usas Tavily.
         next: "END",
       };
     }
-      // Mostramos si se ha decidido usar una herramienta o responder directamente
+
+    // Mostramos si se ha decidido usar una herramienta o responder directamente
     if (parsed.action === "use_tool") {
-      console.log("🔧 El LLM ha decidido usar la tool:", parsed.tool);
+      if (debug) console.log("🔧 El LLM ha decidido usar la tool:", parsed.tool);
       return {
+        //returnamos el estado actualizado con la llamada a la herramienta
         ...state,
         tool_call: {
           tool_name: parsed.tool,
@@ -99,14 +134,14 @@ Incluye en tu respuesta la URL de la fuente si usas Tavily.
         next: "tools",
       };
     } else if (parsed.action === "finish") {
-      console.log("✅ El LLM ha decidido responder directamente.");
+      if (debug) console.log("✅ El LLM ha decidido responder directamente.");
       return {
         ...state,
         result: parsed.answer,
         next: "END",
       };
     } else {
-      // Devuelve un nuevo state, mergeando el resultado
+      console.error("⚠️ Acción desconocida en la respuesta del LLM:", parsed);
       return {
         ...state,
         result: "Error: respuesta desconocida del LLM.",
@@ -117,16 +152,20 @@ Incluye en tu respuesta la URL de la fuente si usas Tavily.
 
   // Nodo de la herramienta
   const toolsNode = async (state) => {
-    //Si se llama a una herramienta se muestra por consola
-    console.log("\n🛠 Ejecutando tools...");
-
+    if (debug) console.log("\n🛠 Ejecutando tools...");
+    // Si no hay tool_call, retornamos al chatbot
     let toolResult = null;
 
     if (state.tool_call?.tool_name === "tavily_search") {
-      toolResult = await tavilyTool.call({
-        query: state.tool_call.args.query,
-      });
-      console.log("🔎 Resultado Tavily:", toolResult);
+      try {
+        toolResult = await tavilyTool.invoke({
+          query: state.tool_call.args.query,
+        });
+        if (debug) console.log("🔎 Resultado Tavily:", toolResult);
+      } catch (error) {
+        console.error("❌ Error ejecutando Tavily:", error);
+        toolResult = "Error: No se pudo ejecutar Tavily.";
+      }
     } else {
       toolResult = "Error: Tool no reconocida.";
     }
@@ -146,27 +185,26 @@ Incluye en tu respuesta la URL de la fuente si usas Tavily.
 
   // Creamos el grafo pasándole el schema.
   const graph = new StateGraph(schema);
-  //Añadimos el LLM como un nodo en el grafo
   graph.addNode("chatbot", chatbotNode);
-  // Añadimos el nodo de herramientas
   graph.addNode("tools", toolsNode);
-  // Definimos el punto de entrada y de salida del grafo.
   graph.addEdge(START, "chatbot");
-  // Añadimos las transiciones entre nodos
   graph.addConditionalEdges("chatbot", (state) => state.next);
   graph.addEdge("tools", "chatbot");
-
   graph.addEdge("chatbot", END);
-  // Compilamos el grafo.
+  // Compilamos el grafo para que esté listo para ejecutar.
   const executor = graph.compile();
 
   // Ejecutamos el grafo con una pregunta inicial.
   const finalState = await executor.invoke({
     input: "¿Dime el tiempo para hoy en Valencia?",
   });
-  // Mostramos el estado final del grafo y la respuesta para hacer debug
-  console.log("\n✅ Estado final:", finalState);
+
+  if (debug) {
+    console.log("\n✅ Estado final:", finalState);
+  }
+
   console.log("\n✅ Respuesta final del grafo:", finalState.result);
 }
+
 // Llama a main y captura errores
 main().catch(console.error);
