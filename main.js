@@ -7,9 +7,29 @@ import { ChatGroq } from "@langchain/groq";
 import { StateGraph, START, END } from "@langchain/langgraph";
 import { z } from "zod";
 import { TavilySearch } from "@langchain/tavily";
+import readline from "readline";
 
 // Flag de debug
-const debug = false; // Con esto se controla si queremos mostrar los logs o solo el resultado final
+const debug = true; // Con esto se controla si queremos mostrar los logs o solo el resultado final
+// Número máximo de mensajes de contexto
+  const MAX_HISTORY_MESSAGES = 10;
+
+// Declaramos la memoria de la conversación
+let chatHistory = [];
+
+// Función para leer input del usuario desde terminal
+function promptUser(question) {
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+  return new Promise((resolve) => {
+    rl.question(question, (answer) => {
+      rl.close();
+      resolve(answer);
+    });
+  });
+}
 
 async function main() {
   // Definimos el esquema de entrada y salida del grafo
@@ -32,7 +52,7 @@ async function main() {
 
   // Prompt que guía al LLM 
   const systemMessage = `
-Eres un asistente inteligente y ordenado. Tu objetivo es ayudar al usuario de forma precisa y segura.
+Eres un asistente inteligente llamado JSBot y ordenado. Tu objetivo es ayudar al usuario de forma precisa y segura.
 
 - Siempre debes responder en formato JSON válido.
 - No escribas texto fuera del bloque JSON (ni explicaciones, ni comentarios, ni etiquetas como <think>).
@@ -62,13 +82,24 @@ Ejemplo de petición para usar Tavily:
   "tool_input":{"query":"Último resultado del Real Madrid"}
 }
 `;
-
   // Definimos el nodo del LLM
   const chatbotNode = async (state) => {
     // Si estamos en modo debug, mostramos el estado actual
     if (debug) console.log("\n🤖 Ejecutando LLM...");
 
-    let prompt = `${systemMessage}\n\nPregunta del usuario: ${state.input}`;
+    // Construimos el historial para mantener el contexto
+    let historyText = "";
+    if (chatHistory.length > 0) {
+      // Nos quedamos con las últimas N entradas para no superar el límite de tokens
+      const trimmedHistory = chatHistory.slice(-MAX_HISTORY_MESSAGES);
+      historyText = "CONVERSACIÓN ANTERIOR:\n";
+      for (const message of trimmedHistory) {
+        historyText += `- ${message.role === "user" ? "Usuario" : "Asistente"}: ${message.content}\n`;
+      }
+    }
+
+    // Creamos el prompt incluyendo el historial y la pregunta actual
+    let prompt = `${systemMessage}\n\n${historyText}\n\nPREGUNTA ACTUAL:\nUsuario: ${state.input}`;
 
     if (state.intermediateSteps?.length) {
       prompt += `\n\nInformación obtenida de herramientas:\n${JSON.stringify(state.intermediateSteps, null, 2)}`;
@@ -125,7 +156,7 @@ Ejemplo de petición para usar Tavily:
     if (parsed.action === "use_tool") {
       if (debug) console.log("🔧 El LLM ha decidido usar la tool:", parsed.tool);
       return {
-        //returnamos el estado actualizado con la llamada a la herramienta
+        //retornamos el estado actualizado con la llamada a la herramienta
         ...state,
         tool_call: {
           tool_name: parsed.tool,
@@ -135,6 +166,11 @@ Ejemplo de petición para usar Tavily:
       };
     } else if (parsed.action === "finish") {
       if (debug) console.log("✅ El LLM ha decidido responder directamente.");
+
+      // Guardamos en el historial
+      chatHistory.push({ role: "user", content: state.input });
+      chatHistory.push({ role: "assistant", content: parsed.answer });
+
       return {
         ...state,
         result: parsed.answer,
@@ -194,16 +230,36 @@ Ejemplo de petición para usar Tavily:
   // Compilamos el grafo para que esté listo para ejecutar.
   const executor = graph.compile();
 
-  // Ejecutamos el grafo con una pregunta inicial.
-  const finalState = await executor.invoke({
-    input: "¿Dime el tiempo para hoy en Valencia?",
-  });
+  // Mensaje de bienvenida
+console.log(`
+👋 ¡Hola! Soy JSBot, tu asistente inteligente.
 
-  if (debug) {
-    console.log("\n✅ Estado final:", finalState);
+Puedo:
+- responder preguntas generales
+- buscar información en Internet si no sé algo (uso Tavily Search)
+- mantener el contexto de nuestra conversación
+
+Para finalizar la conversación en cualquier momento, escribe: salir
+`);
+  // Entramos en bucle para seguir conversando
+  while (true) {
+    const userInput = await promptUser("\n> ");
+
+    if (userInput.toLowerCase() === "salir") {
+      console.log("¡Hasta luego!");
+      break;
+    }
+
+    const finalState = await executor.invoke({
+      input: userInput,
+    });
+
+    if (debug) {
+      console.log("\n Estado final:", finalState);
+    }
+
+    console.log("\n 🤖 Respuesta :", finalState.result);
   }
-
-  console.log("\n✅ Respuesta final del grafo:", finalState.result);
 }
 
 // Llama a main y captura errores
