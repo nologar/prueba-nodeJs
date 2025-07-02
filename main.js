@@ -12,10 +12,34 @@ import readline from "readline";
 // Flag de debug
 const debug = true; // Con esto se controla si queremos mostrar los logs o solo el resultado final
 // Número máximo de mensajes de contexto
-  const MAX_HISTORY_MESSAGES = 10;
+const MAX_HISTORY_MESSAGES = 10;
 
 // Declaramos la memoria de la conversación
 let chatHistory = [];
+
+// -----------------------------------------------
+// Función mejorada para extraer JSON
+// Intenta parsear todo el string primero.
+// Si falla, busca el primer bloque JSON válido, incluso anidado.
+// Lanza errores específicos para mayor control.
+// -----------------------------------------------
+function extractJSON(str) {
+  try {
+    return JSON.parse(str);
+  } catch (e) {
+    // Busca el primer bloque JSON anidado
+    const jsonRegex = /{(?:[^{}]|{(?:[^{}]|{[^{}]*})*})*}/s;
+    const match = str.match(jsonRegex);
+    if (match) {
+      try {
+        return JSON.parse(match[0]);
+      } catch (e2) {
+        throw new Error("JSON inválido dentro del bloque");
+      }
+    }
+    throw new Error("No se encontró JSON en la respuesta del LLM.");
+  }
+}
 
 // Función para leer input del usuario desde terminal
 function promptUser(question) {
@@ -50,9 +74,16 @@ async function main() {
     apiKey: process.env.TAVILY_API_KEY,
   });
 
-  // Prompt que guía al LLM 
+  // Prompt que guía al LLM
+  // Prompt reforzado para indicar al LLM que jamás escriba texto fuera del JSON.
   const systemMessage = `
-Eres un asistente inteligente llamado JSBot y ordenado. Tu objetivo es ayudar al usuario de forma precisa y segura.
+Eres un asistente inteligente llamado JSBot y ordenado. Tu objetivo es ayudar al usuario de forma precisa y segura. Responde siempre en el idioma en que te preguntan.
+
+**IMPORTANTE CRÍTICO**:
+- ¡NUNCA escribas texto FUERA del bloque JSON!
+- Si incluyes texto adicional, el sistema fallará.
+- Ejemplo INCORRECTO: "Pienso que... {\"action\": ...}"
+- Ejemplo CORRECTO: {\"action\": ...}
 
 - Siempre debes responder en formato JSON válido.
 - No escribas texto fuera del bloque JSON (ni explicaciones, ni comentarios, ni etiquetas como <think>).
@@ -69,19 +100,8 @@ Eres un asistente inteligente llamado JSBot y ordenado. Tu objetivo es ayudar al
 }
 
 - Si usas Tavily, incluye en tu respuesta final el enlace de la fuente principal que hayas usado (URL) para respaldar tu información.
-
-Ejemplo de respuesta directa:
-
-{"action":"finish","answer":"El presidente de España es Pedro Sánchez desde 2018."}
-
-Ejemplo de petición para usar Tavily:
-
-{
-  "action":"use_tool",
-  "tool":"tavily_search",
-  "tool_input":{"query":"Último resultado del Real Madrid"}
-}
 `;
+
   // Definimos el nodo del LLM
   const chatbotNode = async (state) => {
     // Si estamos en modo debug, mostramos el estado actual
@@ -108,9 +128,10 @@ Ejemplo de petición para usar Tavily:
     // Instanciamos un modelo de Groq LLM
     const llm = new ChatGroq({
       apiKey: process.env.GROQ_API_KEY,
-      model: "qwen-qwq-32b", // Modelo de Groq qwen.
+      model: "deepseek-r1-distill-llama-70b", // Modelo de Groq deepseek-r1-distill-llama-70b.
       temperature: 0.3, // Controla la aleatoriedad de las respuestas
       maxTokens: 1024, // Máximo de tokens en la respuesta del LLM
+      maxRetries: 2, // Reintentos automáticos en caso de errores transitorios
     });
 
     let response;
@@ -125,29 +146,29 @@ Ejemplo de petición para usar Tavily:
         next: "END",
       };
     }
+
     // Si estamos en modo debug, mostramos la respuesta cruda del LLM
     if (debug) console.log("➡️ Respuesta RAW del LLM:\n", response.content);
 
     let parsed;
     try {
-      // Busca bloque JSON multi-línea en toda la respuesta
-      const regex = /{[\s\S]*}/m;
-      const match = response.content.match(regex);
+      // Usamos la función extractJSON 
+      parsed = extractJSON(response.content);
 
-      if (!match) {
-        throw new Error("No se encontró JSON en la respuesta del LLM.");
-      }
-
-      parsed = JSON.parse(match[0]);
-
-      if (!parsed.action) {
-        throw new Error("El JSON devuelto no contiene el campo 'action'.");
+      // Validación adicional de estructura
+      // Solo se permiten las acciones "finish" o "use_tool"
+      if (!parsed.action || !(parsed.action === "finish" || parsed.action === "use_tool")) {
+        throw new Error("Estructura JSON inválida o acción desconocida.");
       }
     } catch (e) {
       console.error("❌ Error parseando JSON:", e);
+
+      //  En caso de error, limpiamos el historial para evitar loops de contexto corrupto
+      chatHistory = [];
+
       return {
         ...state,
-        result: "Error: El LLM no devolvió JSON válido.",
+        result: "Disculpa, tuve un error interno. ¿Podrías reformular tu pregunta?",
         next: "END",
       };
     }
@@ -231,7 +252,7 @@ Ejemplo de petición para usar Tavily:
   const executor = graph.compile();
 
   // Mensaje de bienvenida
-console.log(`
+  console.log(`
 👋 ¡Hola! Soy JSBot, tu asistente inteligente.
 
 Puedo:
