@@ -246,8 +246,22 @@ Eres un asistente inteligente llamado JSBot y ordenado. Tu objetivo es ayudar al
 
   // Endpoint que recibe la pregunta del usuario y devuelve la respuesta.
   app.post("/api/chat", async (req, res) => {
-    const userInput = req.body.message;
+    const userInput = req.body.message.trim();
 
+  // Si el usuario escribe "salir", devolvemos despedida
+  if (userInput.toLowerCase() === "salir") {
+    chatHistory = [];
+    res.json({
+      answer: "👋 ¡Hasta luego! Ha finalizado la conversación.",
+    });
+
+    setTimeout(() => {
+      console.log("Cerrando servidor...");
+      process.exit(0);
+    }, 1000);
+
+    return;
+  }
     const finalState = await executor.invoke({
       input: userInput,
     });
