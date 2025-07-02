@@ -7,7 +7,8 @@ import { ChatGroq } from "@langchain/groq";
 import { StateGraph, START, END } from "@langchain/langgraph";
 import { z } from "zod";
 import { TavilySearch } from "@langchain/tavily";
-import readline from "readline";
+import express from "express";
+import cors from "cors";
 
 // Flag de debug
 const debug = true; // Con esto se controla si queremos mostrar los logs o solo el resultado final
@@ -39,20 +40,6 @@ function extractJSON(str) {
     }
     throw new Error("No se encontró JSON en la respuesta del LLM.");
   }
-}
-
-// Función para leer input del usuario desde terminal
-function promptUser(question) {
-  const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout,
-  });
-  return new Promise((resolve) => {
-    rl.question(question, (answer) => {
-      rl.close();
-      resolve(answer);
-    });
-  });
 }
 
 async function main() {
@@ -251,25 +238,15 @@ Eres un asistente inteligente llamado JSBot y ordenado. Tu objetivo es ayudar al
   // Compilamos el grafo para que esté listo para ejecutar.
   const executor = graph.compile();
 
-  // Mensaje de bienvenida
-  console.log(`
-👋 ¡Hola! Soy JSBot, tu asistente inteligente.
+  // Empezamos el servidor web
+  // Reemplazamos el bucle de readline por un servidor web.
+  const app = express();
+  app.use(cors());
+  app.use(express.json());
 
-Puedo:
-- responder preguntas generales
-- buscar información en Internet si no sé algo (uso Tavily Search)
-- mantener el contexto de nuestra conversación
-
-Para finalizar la conversación en cualquier momento, escribe: salir
-`);
-  // Entramos en bucle para seguir conversando
-  while (true) {
-    const userInput = await promptUser("\n> ");
-
-    if (userInput.toLowerCase() === "salir") {
-      console.log("¡Hasta luego!");
-      break;
-    }
+  // Endpoint que recibe la pregunta del usuario y devuelve la respuesta.
+  app.post("/api/chat", async (req, res) => {
+    const userInput = req.body.message;
 
     const finalState = await executor.invoke({
       input: userInput,
@@ -279,8 +256,149 @@ Para finalizar la conversación en cualquier momento, escribe: salir
       console.log("\n Estado final:", finalState);
     }
 
-    console.log("\n 🤖 Respuesta :", finalState.result);
-  }
+    res.json({
+      answer: finalState.result,
+    });
+  });
+
+    // Servimos una página HTML bonita estilo chat, con mensaje inicial
+  app.get("/", (req, res) => {
+    res.send(`
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>JSBot</title>
+  <style>
+    body {
+      margin: 0;
+      font-family: sans-serif;
+      background: #f6f8fc;
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+    }
+    #chat {
+      flex: 1;
+      padding: 20px;
+      overflow-y: auto;
+    }
+    .message {
+      max-width: 60%;
+      margin: 10px;
+      padding: 10px 15px;
+      border-radius: 15px;
+      line-height: 1.4;
+      white-space: pre-wrap;
+    }
+    .user {
+      background: #007bff;
+      color: white;
+      margin-left: auto;
+      text-align: right;
+    }
+    .bot {
+      background: #e0e0e0;
+      color: #333;
+      margin-right: auto;
+      text-align: left;
+    }
+    #form {
+      display: flex;
+      padding: 15px;
+      background: #fff;
+      border-top: 1px solid #ddd;
+    }
+    #msg {
+      flex: 1;
+      padding: 10px;
+      font-size: 16px;
+      border: 1px solid #ccc;
+      border-radius: 5px;
+      outline: none;
+    }
+    button {
+      padding: 10px 20px;
+      margin-left: 10px;
+      background: #007bff;
+      color: white;
+      border: none;
+      border-radius: 5px;
+      cursor: pointer;
+    }
+    button:hover {
+      background: #0056b3;
+    }
+  </style>
+</head>
+<body>
+  <div id="chat"></div>
+  <form id="form">
+    <input id="msg" autocomplete="off" placeholder="Escribe tu mensaje..." />
+    <button type="submit">Enviar</button>
+  </form>
+  <script>
+    const chat = document.getElementById("chat");
+    const form = document.getElementById("form");
+    const input = document.getElementById("msg");
+
+    // ✅ Mensaje de bienvenida mostrado nada más entrar
+    window.addEventListener("DOMContentLoaded", () => {
+      const mensajeBienvenida = \`👋 ¡Hola! Soy JSBot, tu asistente inteligente.
+
+Puedo:
+- responder preguntas generales
+- buscar información en Internet si no sé algo (uso Tavily Search)
+- mantener el contexto de nuestra conversación
+
+Para finalizar la conversación en cualquier momento, escribe: salir\`;
+      addMessage("bot", mensajeBienvenida);
+    });
+
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const userMessage = input.value;
+      if (!userMessage.trim()) return;
+
+      addMessage("user", userMessage);
+      input.value = "";
+
+      addMessage("bot", "Escribiendo...");
+
+      const res = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: userMessage }),
+      });
+      const data = await res.json();
+
+      // Reemplaza el "Escribiendo..." por la respuesta real
+      document.querySelectorAll(".bot").forEach(el => {
+        if (el.textContent === "Escribiendo...") el.remove();
+      });
+
+      addMessage("bot", data.answer);
+    });
+
+    function addMessage(sender, text) {
+      const div = document.createElement("div");
+      div.className = "message " + sender;
+      div.textContent = text;
+      chat.appendChild(div);
+      chat.scrollTop = chat.scrollHeight;
+    }
+  </script>
+</body>
+</html>
+    `);
+  });
+
+
+  // Iniciamos el servidor en el puerto 3000
+  app.listen(3000, () => {
+    console.log("Servidor corriendo en http://localhost:3000");
+  });
 }
 
 // Llama a main y captura errores
